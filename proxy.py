@@ -1,38 +1,79 @@
 # -*- coding: utf-8 -*-
 
 import socket
+import sys
+import signal
+import gevent
+from gevent.server import StreamServer
+from gevent.socket import (
+    create_connection,
+    gethostbyname,
+)
 
 LISTEN_PORT = 1235
 HTTP_PORT = 8000
 SS_PORT = 9876
 BUFFER_SIZE = 1024
 
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.bind(('0.0.0.0', LISTEN_PORT))
-s.listen(5)
-print('Starting proxy server on: 0.0.0.0:{}.'.format(LISTEN_PORT))
 
-while True:
-    conn, addr = s.accept()
-    data = b''
+class MixedTCPServer(StreamServer):
 
-    while True:
-        part = conn.recv(BUFFER_SIZE)
-        data += part
-        if len(part) < BUFFER_SIZE:
-            if len(data) > 3 and data[:3] == b'GET':
-                print('Recv heartbeat.')
-                port = HTTP_PORT
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as c:
-                c.connect(('127.0.0.1', port))
-                c.sendall(data)
-                while True:
-                    data2 = c.recv(1024)
-                    if not data2:
-                        break
-                    try:
-                        conn.send(data2)
-                    except:
-                        break
-            break
-        port = SS_PORT
+    def __init__(self, listen_port, http_port, tcp_forward_port, **kwargs):
+        super().__init__('0.0.0.0:{}'.format(listen_port), **kwargs)
+        self.http_service = '127.0.0.1:{}'.format(http_port)
+        self.tcp_service = '127.0.0.1:{}'.format(tcp_forward_port)
+
+    def handle(self, source, address):
+        init_data = source.recv(BUFFER_SIZE)
+        try:
+            if len(init_data) > 3 and init_data[:3] == b'GET':
+                dest = create_connection(self.http_service)
+            else:
+                dest = create_connection(self.tcp_service)
+        except IOError as ex:
+            sys.stderr.write('Error on create connection: {}'.format(ex))
+            return
+        forwarders = (
+            gevent.spawn(forward, source, dest, self),
+            gevent.spawn(forward, dest, source, self),
+        )
+        gevent.joinall(forwarders)
+
+    def close(self):
+        if not self.closed:
+            sys.stderr('Closing...')
+            super().close()
+
+
+def forward(source, dest, server):
+    try:
+        while True:
+            try:
+                data = source.recv(BUFFER_SIZE)
+                if not data:
+                    break
+                dest.sendall(data)
+            except KeyboardInterrupt:
+                if not server.closed:
+                    server.close()
+                break
+            except socket.error:
+                if not server.closed:
+                    server.close()
+                break
+    finally:
+        source.close()
+        dest.close()
+        server = None
+
+
+def main():
+    server = MixedTCPServer(LISTEN_PORT, HTTP_PORT, SS_PORT)
+    gevent.signal(signal.SIGTERM, server.close)
+    gevent.signal(signal.SIGINT, server.close)
+    server.start()
+    gevent.wait()
+
+
+if __name__ == '__main__':
+    main()
