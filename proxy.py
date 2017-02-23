@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 
+from gevent.monkey import patch_all
+patch_all()
+
+import time
 import socket
 import sys
 import signal
 import gevent
+from wsgiref.handlers import format_date_time
 from gevent.server import StreamServer
 from gevent.socket import (
     create_connection,
@@ -11,23 +16,22 @@ from gevent.socket import (
 )
 
 LISTEN_PORT = 1235
-HTTP_PORT = 8000
 SS_PORT = 9876
 BUFFER_SIZE = 1024
 
 
 class MixedTCPServer(StreamServer):
 
-    def __init__(self, listen_port, http_port, tcp_forward_port, **kwargs):
+    def __init__(self, listen_port, tcp_forward_port, **kwargs):
         super().__init__('0.0.0.0:{}'.format(listen_port), **kwargs)
-        self.http_service = '127.0.0.1:{}'.format(http_port)
         self.tcp_service = '127.0.0.1:{}'.format(tcp_forward_port)
 
     def handle(self, source, address):
         init_data = source.recv(BUFFER_SIZE)
         try:
             if len(init_data) > 3 and init_data[:3] == b'GET':
-                dest = create_connection(self.http_service)
+                source.sendall(b'HTTP/1.1 200 OK\r\n' + format_date_time(time.time()).encode() + b'\r\n\r\nOK')
+                return
             else:
                 dest = create_connection(self.tcp_service)
         except IOError as ex:
@@ -41,7 +45,7 @@ class MixedTCPServer(StreamServer):
 
     def close(self):
         if not self.closed:
-            sys.stderr('Closing...')
+            sys.stderr.write('Closing...')
             super().close()
 
 
@@ -68,7 +72,7 @@ def forward(source, dest, server):
 
 
 def main():
-    server = MixedTCPServer(LISTEN_PORT, HTTP_PORT, SS_PORT)
+    server = MixedTCPServer(LISTEN_PORT, SS_PORT)
     gevent.signal(signal.SIGTERM, server.close)
     gevent.signal(signal.SIGINT, server.close)
     server.start()
